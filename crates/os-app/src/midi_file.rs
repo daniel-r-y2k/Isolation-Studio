@@ -1180,6 +1180,45 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn browser_midi_drop_on_existing_sample() {
+        use crate::app::{Action, Drag, Win};
+        use crate::views::browser::{rows, Item};
+        let path = write_three("browser_rack");
+        let mut app = test_app();
+        let mut canvas = os_ui::Canvas::new(1600, 900, 1.0).unwrap();
+        app.state.z = vec![Win::ChannelRack];
+        app.add_browser_folder(path.parent().unwrap().to_path_buf());
+        let item = Item::File(path.to_string_lossy().into_owned());
+        let source = rows(&app.state).iter().position(|r| r.item == item).unwrap();
+        app.browser_act(&Action::BrowserRow(source));
+        assert!(matches!(app.drag, Some(Drag::Browser { .. })), "MIDI files start a browser drag");
+        app.state.selected_channel = 0;
+        let ch = app.state.project.channels[1].index;
+        crate::patterns::pat_mut(&mut app.state, 1).notes = vec![Note::step(ch, 0), Note::step(0, 0)];
+        let before = app.state.project.clone();
+        app.paint(&mut canvas, None);
+        let target = crate::views::rack::name_rect(&app.state, 1).unwrap();
+        app.mouse_move(target.cx(), target.cy());
+        assert_eq!(app.state.drop_on.map(|t| t.0), Some(Win::ChannelRack));
+        app.mouse_up();
+        assert!(form(&app).unwrap().piano, "the drop uses the channel import, never a new project");
+        assert_eq!(app.state.selected_channel, 1);
+        app.dialog_click(crate::dialog::DHit::Form(FHit::Main));
+        assert_eq!(app.state.project.channels, before.channels, "the sample and instrument settings survive");
+        assert_eq!(app.state.project.pattern(1).unwrap().notes.iter().filter(|n| n.channel == ch).count(), 4);
+        assert_eq!(app.state.project.pattern(1).unwrap().notes.iter().filter(|n| n.channel == 0).count(), 1);
+        assert_eq!(crate::history::undo(&mut app.state).as_deref(), Some(IMPORT_STEP));
+        assert_eq!(app.state.project.patterns, before.patterns);
+        // A plain click, or a release outside any instrument row, imports nothing.
+        app.browser_drop(item.clone(), false);
+        assert!(form(&app).is_none());
+        app.mouse_move(0.0, 0.0);
+        app.browser_drop(item, true);
+        assert!(form(&app).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
     /// Shift+Ctrl+M is FILE ▸ Export MIDI...: the save dialog, the file written with the .mid it was not given. A
     /// dropped .mid opens the form; Esc closes it and imports nothing.
     #[test]

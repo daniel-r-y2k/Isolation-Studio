@@ -100,7 +100,7 @@ pub fn section_key(name: &str) -> Option<String> {
     sections().any(|l| l == name).then(|| format!("{}/{name}", project_root()))
 }
 
-/// What a row stands for; everything but `None`, `File` and `History` can be dragged (spec §3).
+/// What a row stands for; everything but `None`, non-MIDI `File` and `History` can be dragged (spec §3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     None,
@@ -114,7 +114,7 @@ pub enum Item {
     Generator(usize),
     /// An effect (index into `Plugins::effects`).
     Effect(usize),
-    /// A non-audio file in a dropped folder (not draggable, spec §6).
+    /// A non-audio file in a dropped folder (MIDI files can be dragged onto instrument rows).
     File(String),
     /// A parameter of a hosted plugin: hosted key, parameter index (spec: plugins/plugin-parameters.md §6).
     Param(usize, usize),

@@ -19,6 +19,11 @@ const DRAG_START: f32 = 4.0;
 /// How long a clicked sample plays (spec §7).
 const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn midi_item(item: &Item) -> bool {
+    matches!(item, Item::File(path) if std::path::Path::new(path).extension().and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mid") || e.eq_ignore_ascii_case("midi")))
+}
+
 impl App {
     /// Browser actions; returns whether `a` was one.
     pub(crate) fn browser_act(&mut self, a: &Action) -> bool {
@@ -73,7 +78,7 @@ impl App {
                 }
                 let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
+                if midi_item(&row.item) || !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -528,9 +533,22 @@ impl App {
                 Win::Mixer => slot(),
                 _ => grid.or(rack),
             },
+            Item::File(_) if midi_item(item) => self.midi_rack_row()
+                .and_then(|row| crate::views::rack::name_rect(s, row)).zip(rack).map(|(r, panel)| r.intersect(&panel)),
             Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => None,
         }?;
         Some((win, r))
+    }
+
+    /// MIDI notes can be dropped only on an existing instrument row, including filtered/scrolled racks.
+    fn midi_rack_row(&self) -> Option<usize> {
+        let (x, y) = self.mouse;
+        if self.top_hit(x, y).and_then(|h| h.win) != Some(Win::ChannelRack) {
+            return None;
+        }
+        crate::views::rack::row_at(&self.state, y).filter(|&row| {
+            !matches!(self.state.project.channels[row].kind, ChannelKind::AudioClip | ChannelKind::Automation)
+        })
     }
 
     /// Esc during a browser drag cancels it: nothing is dropped when the button comes up, and the tag falls away
@@ -559,6 +577,14 @@ impl App {
         self.state.drop_on = None;
         self.invalidate();
         if !started {
+            return;
+        }
+        if midi_item(&item) {
+            if let (Item::File(path), Some(row)) = (item, self.midi_rack_row()) {
+                self.state.selected_channel = row;
+                self.state.rack.select_only(row);
+                self.midi_file_chosen(path.into(), true);
+            }
             return;
         }
         // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).

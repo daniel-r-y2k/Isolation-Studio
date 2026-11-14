@@ -632,6 +632,9 @@ and Touch controller. Kept with the program's settings, not the project. Which w
 
 ## ✅ MIDI files
 
+- Drag a `.mid` or `.midi` file from the Browser onto an existing instrument/sample row in the Instrument rack:
+  the channel import adds the notes to the current pattern, replacing or blending through the MIDI import options.
+  The sample and instrument settings stay intact; the import can be undone in one step.
 - FILE ▸ Import ▸ MIDI file... (or a .mid dropped on the window): the Import MIDI data form picks the tracks, the
   MIDI channels, the instrument (Lemon Trio, Citrus or Lemon Sampler) and the options; a new project, or the file
   added to this one as one undo step. A channel per track (or per MIDI channel) with its notes, volume, pan and pitch
