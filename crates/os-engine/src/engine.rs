@@ -3090,6 +3090,11 @@ impl Engine {
     /// Takes a project edit in place (see [`LiveEdit`]), as a new engine for the edited project would have it.
     pub fn apply_edit(&mut self, edit: LiveEdit) {
         match edit {
+            LiveEdit::Sidechain(t, k, settings) => {
+                if let Some(slot) = self.tracks.get_mut(t).and_then(|m| m.effects.iter_mut().find(|e| e.slot == k)) {
+                    if let Fx::Own(fx) = &mut slot.fx { fx.set_sidechain(settings); }
+                }
+            }
             LiveEdit::ChannelVolume(c, v) => {
                 if let Some(ch) = self.channels.get_mut(c) {
                     ch.glide(Some(v), None, 0);
@@ -4790,6 +4795,7 @@ pub enum LiveEdit {
     MixerVolume(usize, f64),
     MixerPan(usize, f64),
     MixerSeparation(usize, f64),
+    Sidechain(usize, usize, crate::effects::sidechain::Settings),
 }
 
 impl LiveEdit {
@@ -4801,6 +4807,11 @@ impl LiveEdit {
             }
         };
         match self {
+            LiveEdit::Sidechain(t, k, settings) => {
+                if let Some(p) = project.mixer.get_mut(t).and_then(|m| m.slots.get_mut(k)).and_then(Option::as_mut) {
+                    if p.name == crate::effects::sidechain::NAME { p.state = settings.encode(); }
+                }
+            }
             LiveEdit::ChannelVolume(c, v) => channel(project, c, &mut |ch| ch.volume = v),
             LiveEdit::ChannelPan(c, p) => channel(project, c, &mut |ch| ch.pan = p),
             LiveEdit::ChannelPitch(c, cents) => channel(project, c, &mut |ch| ch.pitch_cents = cents),
@@ -4843,6 +4854,15 @@ pub fn live_edits(sent: &mut Project, new: &Project) -> Option<Vec<LiveEdit>> {
         }
     }
     for (t, (a, b)) in sent.mixer.iter().zip(&new.mixer).enumerate() {
+        for (k, (old, new)) in a.slots.iter().zip(&b.slots).enumerate() {
+            if let (Some(old), Some(new)) = (old, new) {
+                if old.name == crate::effects::sidechain::NAME && new.name == old.name && old.id == new.id && old.state != new.state {
+                    if let (Some(before), Some(after)) = (crate::effects::sidechain::Settings::decode(&old.state), crate::effects::sidechain::Settings::decode(&new.state)) {
+                        if before.source == after.source { edits.push(LiveEdit::Sidechain(t, k, after)); }
+                    }
+                }
+            }
+        }
         if let (true, Some(v)) = (a.volume != b.volume, b.volume) {
             edits.push(LiveEdit::MixerVolume(t, v));
         }
@@ -9204,6 +9224,38 @@ mod tests {
         let mut state = crate::effects::state_of(&v);
         state.push(0);
         os_model::SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state }
+    }
+
+    #[test]
+    fn mixer_sidechain_ducks_only_from_the_selected_source() {
+        use crate::effects::sidechain::{Settings, NAME};
+        let mut p = insert_project();
+        p.patterns[0].notes = vec![long_note(0, 96, 0), long_note(96, 96, 0)];
+        p.channels[0].volume = 0.05;
+        p.channels.push(Channel { index: 1, mixer_track: 2, ..channel() });
+        p.patterns[0].notes.push(Note { channel: 1, ..long_note(96, 96, 0) });
+        p.mixer[2].routes = vec![1];
+        p.mixer[2].send_levels = vec![(1, 0.0)];
+        let dry = render_with(&p, false);
+        let settings = Settings { source: Some(2), values: [-40.0, 10.0, 0.1, 150.0, 0.0, 1.0] };
+        p.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: NAME.into(), state: settings.encode() });
+        let wet = render_with(&p, false);
+        let beat = (44100.0 * 60.0 / 130.0) as usize;
+        assert!(dry[..8000].iter().zip(&wet).all(|(a, b)| (a - b).abs() < 1e-5));
+        assert!(rms(&wet[2 * beat + 1000..2 * beat + 8000]) < rms(&dry[2 * beat + 1000..2 * beat + 8000]) * 0.5);
+        // A missing source must never fall back to another track's input.
+        p.mixer[1].slots[0].as_mut().unwrap().state = Settings { source: Some(99), ..settings }.encode();
+        assert_eq!(render_with(&p, false), dry);
+        p.mixer[1].slots[0].as_mut().unwrap().state = settings.encode();
+        p.mixer[1].slot_on[0] = false;
+        assert_eq!(render_with(&p, false), dry);
+        p.mixer[1].slot_on[0] = true;
+        let mut new = p.clone();
+        let mut adjusted = settings;
+        adjusted.values[0] = -12.0;
+        new.mixer[1].slots[0].as_mut().unwrap().state = adjusted.encode();
+        assert_eq!(live_edits(&mut p, &new), Some(vec![LiveEdit::Sidechain(1, 0, adjusted)]));
+        assert_eq!(p, new);
     }
 
     /// spec: audio/sidechain.md "Settings", "Sidechain input"; plugins/fruity-limiter-dsp.md: a Fruity Limiter on

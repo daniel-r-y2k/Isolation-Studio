@@ -88,6 +88,7 @@ mod track_links;
 mod midi_play;
 mod container;
 mod mixer;
+mod sidechain;
 mod mixer_state;
 mod osc3;
 mod citrus;

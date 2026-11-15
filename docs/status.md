@@ -152,6 +152,11 @@ editor, the rack's Loop step channels / Loop all channels). The full, item-by-it
 - Several tracks selected (Ctrl+click, or Ctrl+Shift+drag across strips, which adds to the selection) move their
   faders together, each by the same number of dB; Shift+wheel over a strip moves its track
 - Polarity and stereo swap, main volume and main pitch
+- Mixer detail panel: Sidechain below the EQ enables a native stereo compressor in a free FX slot. Choose a trigger
+  track to add a silent send, then drag or scroll Threshold, Ratio, Attack, Release, Knee and Mix (right-click to type
+  values in dB, milliseconds, ratio or percent). Existing sends and the trigger's normal output are preserved. Turning
+  it off retains the settings; edits support undo and project/track-state saves. Without a trigger it passes audio
+  unchanged. Parameter changes during playback retain the compressor envelope.
 - Sidechain inputs: a project's Fruity Limiter slot listens to the track routed into its track that its sidechain
   number names (Sidechain to this track routes count), heard after that track's fader and delayed to line up
 - CLAP and VST3 effects get a sidechain input too: pick it in the slot menu's Sidechain input submenu, which lists

@@ -383,7 +383,12 @@ impl Engine {
                     k if hosted => super::input_at(&self.tracks, t, k),
                     k => super::input(&self.tracks, t, k),
                 };
-                let (src, main) = (pick(fx.key_input()), pick(if hosted { fx.ports[0] } else { 0 }));
+                let explicit = match &fx.fx { super::Fx::Own(e) => e.key_track(), _ => None };
+                let src = match explicit {
+                    Some(src) => (src < n && src != t && self.tracks[src].routes.iter().any(|r| r.dest == t)).then_some(src),
+                    None => pick(fx.key_input()),
+                };
+                let main = pick(if hosted { fx.ports[0] } else { 0 });
                 let late = |s: Option<usize>| s.map_or(0, |s| (self.pdc.slot_late[t][fx.slot] - l.leaving[s]).max(0) as usize);
                 let (len, main_len) = (late(src), late(main));
                 let fx = &mut self.tracks[t].effects[i];

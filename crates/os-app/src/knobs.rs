@@ -37,6 +37,8 @@ pub enum KnobId {
     /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
     /// band's fader; 1 frequency; 2 width) (model `MixerTrack::eq`; spec: ui/mixer.md §8, audio/mixer.md "Equaliser").
     Eq(u16, u8, u8),
+    /// Mixer sidechain parameter (track, parameter index).
+    Sidechain(u16, u8),
     /// A knob of the piano roll's Strum dialog (dialog state, not project data; spec: ui/piano-strum.md §1).
     Strum(crate::strum::Knob),
     /// A knob (or the Range box) of the piano roll's Arpeggiate dialog (dialog state; spec: ui/piano-arpeggiate.md §1).
@@ -189,6 +191,7 @@ impl KnobId {
             KnobId::ChanVol(_) => 0.78125,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
+            KnobId::Sidechain(_, k) => crate::sidechain::Settings::position(k, crate::sidechain::Settings::default().values[usize::from(k.min(5))]),
             // A member's levels as Add effect starts them: wet only.
             KnobId::Member(.., wet) => f32::from(u8::from(wet)),
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
@@ -263,6 +266,7 @@ impl State {
 
     pub fn knob(&self, id: KnobId) -> f32 {
         match id {
+            KnobId::Sidechain(t, k) => crate::sidechain::Settings::position(k, crate::sidechain::settings(self, t).values[usize::from(k.min(5))]),
             KnobId::MixPan(t) => {
                 let pan = self.project.mixer.iter().find(|m| m.index == t).and_then(|m| m.pan).unwrap_or(0.0);
                 (0.5 + pan as f32 / 2.0).clamp(0.0, 1.0)
@@ -377,6 +381,11 @@ impl State {
                 self.project.main_pitch = Some(((v - 0.5) * 2400.0).round() as i16);
                 self.piano.dirty = true;
             }
+            KnobId::Sidechain(t, k) => {
+                let mut st = crate::sidechain::settings(self, t);
+                st.values[usize::from(k.min(5))] = crate::sidechain::Settings::value(k, v);
+                crate::sidechain::store(self, t, st);
+            }
             KnobId::Eq(t, b, f) => {
                 if let Some(m) = self.project.mixer.iter_mut().find(|m| m.index == t) {
                     let stored = if f == 0 { ((v * 2.0 - 1.0) * 1800.0).round() as i32 } else { (v * 65536.0).round() as i32 };
@@ -477,6 +486,7 @@ impl State {
                 crate::container::level_text(&name, wet, n)
             }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
+            KnobId::Sidechain(_, k) => format!("Sidechain {}: {}", crate::sidechain::LABELS[usize::from(k.min(5))], crate::sidechain::Settings::text(k, n)),
             KnobId::Eq(_, b, f) => {
                 let band = EQ_BANDS[usize::from(b.min(2))];
                 match f {

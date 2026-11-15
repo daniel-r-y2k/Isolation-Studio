@@ -54,6 +54,8 @@ pub enum MHit {
     Scale,
     /// The current track's equaliser graph: a press grabs the band nearest the cursor's frequency.
     EqGraph,
+    SidechainEnable,
+    SidechainSource,
     /// The current track's record-source icon, input combo and output combo (spec: audio/track-io.md §1.1).
     RecSource,
     Input,
@@ -135,6 +137,7 @@ pub enum MCmd {
     /// Sidechain input ▸ (Lemon Studio's own): the input of the current track a hosted plugin's sidechain bus hears,
     /// counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
     SlotSidechain(u8, usize),
+    SidechainSource(Option<u16>),
     /// A track's audio input and output as stored (-1: none), its record source and its monitor mode (spec:
     /// audio/track-io.md §1.6).
     Input(u16, i32),
@@ -400,6 +403,7 @@ fn remap_slot_ui(s: &mut State, f: impl Fn(u16, u8) -> Option<(u16, u8)>) {
 /// editor's, and the remote control links (`remote::follow`). A link whose place went goes.
 fn follow_places(s: &mut State, track: &dyn Fn(u16) -> Option<u16>, slot: &dyn Fn(u16, u8) -> Option<(u16, u8)>) {
     s.project.follow_mixer_places(track, slot);
+    crate::sidechain::remap(s, track);
     if let Some(t) = os_model::target::moved(s.events.target, track, slot) {
         s.events.target = t;
     }
@@ -642,6 +646,14 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     match h {
+        MHit::SidechainEnable => {
+            let t = s.selected_mixer;
+            edit(s, "Sidechain enable", Region::Track(t), crate::sidechain::toggle)
+        }
+        MHit::SidechainSource => {
+            s.playlist.popup = Some(crate::sidechain::source_menu(s, (at.0, at.1 + 10.0)));
+            None
+        }
         MHit::Strip(n) => {
             select(s, n, ctrl);
             if shift && !ctrl {
@@ -1958,6 +1970,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AutoBypassAll => Some("Auto-bypass for all plugins"),
         MCmd::PdcAuto => Some("Plugin delay compensation"),
         MCmd::Reset(_) => Some("Mixer track reset"),
+        MCmd::SidechainSource(_) => Some("Sidechain source"),
         MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
         // The original's History names (spec: ui/one-click-recording.md §1).
@@ -1997,6 +2010,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     let msg = match c {
+        MCmd::SidechainSource(source) => crate::sidechain::source(s, source),
         MCmd::Rename(n) => {
             start_rename(s, n, at);
             None
@@ -2701,6 +2715,13 @@ impl App {
     }
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
+        if crate::sidechain::slot(&self.state, track) == Some(usize::from(slot)) {
+            self.state.selected_mixer = track;
+            self.state.raise(crate::app::Win::Mixer);
+            self.state.message = Some("Sidechain controls are below the mixer EQ".into());
+            self.invalidate();
+            return;
+        }
         let key = crate::plugins::fx_key(track, slot);
         // A container: its list's window.
         if crate::container::members(&self.state, track, slot).is_some() {

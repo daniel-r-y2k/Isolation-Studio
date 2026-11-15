@@ -20,6 +20,7 @@ pub mod maximus;
 pub mod peak_ctrl;
 pub mod phaser;
 pub mod reverb;
+pub mod sidechain;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
@@ -45,6 +46,10 @@ pub trait Effect: Send {
     fn extra(&self) -> Option<(usize, &[f32])> {
         None
     }
+    /// Live mixer compressor edits retain the detector envelope.
+    fn set_sidechain(&mut self, _settings: sidechain::Settings) {}
+    /// An explicit mixer track for a keyed effect; independent of input ordering.
+    fn key_track(&self) -> Option<usize> { None }
     /// A sidechain input (Fruity Limiter's): the number of the track's input it listens to, counted from 1, 0 = none
     /// (spec: audio/sidechain.md "Sidechain input").
     fn key_input(&self) -> usize {
@@ -75,6 +80,7 @@ pub trait Effect: Send {
 /// The FLP plugin name only identifies the saved-state format.
 pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn Effect>> {
     match name {
+        sidechain::NAME => sidechain::Compressor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Parametric EQ 2" => eq::ParametricEq::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Limiter" => limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Reeverb 2" => reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),

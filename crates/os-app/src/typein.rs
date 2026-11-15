@@ -132,7 +132,7 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::Swing | KnobId::SlotMix(..) | KnobId::Member(..)) | Target::Member(..) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
-        Target::Param(..) | Target::MemberParam(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..)) => Unit::Plain,
+        Target::Param(..) | Target::MemberParam(..) | Target::Knob(KnobId::Sidechain(..) | KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..)) => Unit::Plain,
         Target::Latency(..) => Unit::Latency,
         Target::RackTrack(_) => Unit::Track,
         Target::RackLed(_) => Unit::Switch,
@@ -322,6 +322,9 @@ fn short(v: f64, places: usize) -> String {
 
 /// The field's text for the box's current value in a mode (spec §3, §6).
 pub fn text(s: &State, t: Target, norm: bool) -> String {
+    if let Target::Knob(id @ KnobId::Sidechain(_, k)) = t {
+        return crate::sidechain::Settings::text(k, s.knob(id));
+    }
     let n = get(s, t).unwrap_or(0.0);
     if let Target::Latency(_, _, u) = t {
         return short(n / u.ms(s), 4);
@@ -368,6 +371,14 @@ fn strip_suffix_ci<'a>(text: &'a str, suffix: &str) -> &'a str {
 /// The knob position (0..1) typed `text` asks for; `None` leaves the value as it is: empty or unreadable text
 /// (spec §4, §5, §8; unreadable = unchanged is the OS choice).
 pub fn parse(t: Target, norm: bool, text: &str) -> Option<f64> {
+    if let Target::Knob(KnobId::Sidechain(_, k)) = t {
+        let text = text.trim();
+        let suffix = match k { 0 | 4 => "dB", 1 => ":1", 2 | 3 => "ms", _ => "%" };
+        let mut v: f32 = strip_suffix_ci(text, suffix).parse().ok()?;
+        if !v.is_finite() { return None; }
+        if k == 5 { v /= 100.0; }
+        return Some(f64::from(crate::sidechain::Settings::position(k, v)));
+    }
     let text = text.trim();
     if text.is_empty() {
         return None;

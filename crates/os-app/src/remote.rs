@@ -127,7 +127,7 @@ impl Link {
 /// and dry levels (Lemon Studio's design: spec plugins/patcher/README.md §4.2).
 fn linkable(t: Target) -> bool {
     // A member's level knob links as its level (`KnobId::target`).
-    !matches!(t, Target::Knob(KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..)) | Target::Latency(..))
+    !matches!(t, Target::Knob(KnobId::Sidechain(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..)) | Target::Latency(..))
 }
 
 /// A target as `settings.txt` keeps it (`none` for one that is not linkable, which reads back as nothing).
@@ -144,7 +144,7 @@ fn target_text(t: Target) -> String {
             KnobId::ChanPan(r) => format!("chanpan:{r}"),
             KnobId::Swing => "swing".into(),
             KnobId::Eq(m, b, f) => format!("eq:{m}:{b}:{f}"),
-            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..) => "none".into(),
+            KnobId::Sidechain(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) | KnobId::Member(..) => "none".into(),
         },
         Target::Fader(m) => format!("fader:{m}"),
         Target::Param(key, i) => format!("param:{key}:{i}"),

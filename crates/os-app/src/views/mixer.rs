@@ -814,8 +814,10 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     }
     // Squish: the slot rows and the equalizer graph shrink with the height (the knob rows under
     // the graph are dropped when they no longer fit); the top and bottom rows keep their size.
-    let room = r.h - 125.0;
-    let kp = ((room - 15.0) / 503.0).clamp(0.3, 1.0);
+    let sidechain_on = crate::sidechain::enabled(s, n);
+    let sidechain_h = if sidechain_on { 132.0 } else { 28.0 };
+    let room = r.h - 125.0 - sidechain_h;
+    let kp = ((room - 15.0) / 503.0).clamp(0.2, 1.0);
     let knobs = room >= 579.0;
     let q = kp.max(0.55);
     // Input row: the record-source icon with its label, the input combo, the input latency clock (not available yet:
@@ -986,6 +988,7 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
         ui.c.glyph(ui.t.tx(0x8c969c), &g);
     }
     let b = r.bottom();
+    sidechain_panel(ui, s, Rect::new(r.x + 4.0, b - 66.0 - sidechain_h, r.w - 8.0, sidechain_h));
 
     // Output rows at the bottom: the track latency combo, then the output combo.
     ui.c.fill_rect(Rect::new(r.x, b - 66.0, r.w, 1.0), ui.t.s(0x1f2224));
@@ -1005,6 +1008,41 @@ fn slot_panel(ui: &mut Ui, s: &State, r: Rect) {
     let out = Rect::new(r.x + 26.0, b - 28.0, 189.0, 24.0);
     let hov = ui.hit(out, Action::Mix(MHit::Output), "Audio output target");
     os_ui::kit::combo(ui.c, ui.t, out, &mx::output_label(s, n), Font::new(17), os_ui::kit::State::hover(hov));
+}
+
+/// Quick sidechain setup beneath the equalizer. Values drag and scroll like the other mixer controls.
+fn sidechain_panel(ui: &mut Ui, s: &State, r: Rect) {
+    let n = s.selected_mixer;
+    let on = crate::sidechain::enabled(s, n);
+    let t = ui.t;
+    ui.c.fill_rect(Rect::new(r.x, r.y, r.w, 1.0), t.s(0x1f2224));
+    let header = Rect::new(r.x, r.y + 3.0, r.w, 22.0);
+    let hov = ui.hit(header, Action::Mix(MHit::SidechainEnable), "Enable sidechain compression (uses one FX slot)");
+    let check = Rect::new(r.x + 3.0, r.y + 7.0, 13.0, 13.0);
+    ui.c.fill_rrect(check, 2.0, t.s(0x141516));
+    ui.c.stroke_rrect(check, 2.0, 1.0, if hov { t.glyph } else { t.text_dim });
+    if on { os_ui::kit::tick(ui.c, check, t.glyph); }
+    ui.c.text(Font::new(13), r.x + 23.0, r.y + 5.0, t.text, "Sidechain");
+    if !on { return; }
+    let st = crate::sidechain::settings(s, n);
+    let combo = Rect::new(r.x + 3.0, r.y + 27.0, r.w - 6.0, 23.0);
+    let source = st.source.filter(|&src| mx::track(s, src).is_some());
+    let text = source.map_or_else(|| "Choose trigger track".into(), |src| format!("From: {}", mx::name(s, src)));
+    let hov = ui.hit(combo, Action::Mix(MHit::SidechainSource), "Choose the track that ducks this track");
+    os_ui::kit::combo(ui.c, t, combo, &text, Font::new(12), os_ui::kit::State::hover(hov));
+    for k in 0..6u8 {
+        let id = KnobId::Sidechain(n, k);
+        let col = k % 2;
+        let row = k / 2;
+        let w = (r.w - 10.0) / 2.0;
+        let field = Rect::new(r.x + 3.0 + f32::from(col) * (w + 4.0), r.y + 55.0 + f32::from(row) * 24.0, w, 21.0);
+        let hov = ui.hit(field, Action::Knob(id), s.knob_text(id));
+        ui.c.fill_rrect(field, 3.0, t.s(if hov { 0x3b4043 } else { 0x25282a }));
+        ui.c.text(Font::new(10), field.x + 4.0, field.y + 1.0, t.text_dim, crate::sidechain::LABELS[usize::from(k)]);
+        let value = crate::sidechain::Settings::text(k, s.knob(id));
+        let width = ui.c.text_width(Font::new(10), &value);
+        ui.c.text(Font::new(10), field.right() - width - 4.0, field.y + 10.0, t.text, &value);
+    }
 }
 
 /// An input combo with nothing to choose (no device inputs): drawn greyed out with `text`, its hit only says so.
