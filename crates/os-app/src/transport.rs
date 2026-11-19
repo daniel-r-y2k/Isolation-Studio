@@ -103,6 +103,9 @@ const TICK_ROOM: usize = 1 << 17;
 /// State the UI reads every frame.
 #[derive(Default)]
 pub struct Shared {
+    sidechain_track: AtomicU32,
+    sidechain_reduction: AtomicU64,
+    sidechain_levels: [AtomicU64; 2],
     state: AtomicU8,
     /// Counts play and stop requests (see the module docs).
     generation: AtomicU64,
@@ -569,6 +572,24 @@ impl Transport {
     }
 
     /// Peak per mixer track (L, R) heard since the last call (the mixer meters' feed); resets them.
+    pub fn sidechain_reduction(&self, track: u16) -> f32 {
+        let track = u32::from(track);
+        if self.shared.sidechain_track.swap(track, Ordering::Relaxed) != track { return 0.0; }
+        if self.shared.state.load(Ordering::Relaxed) != PLAYING { return 0.0; }
+        let reading = self.shared.sidechain_reduction.load(Ordering::Relaxed);
+        if (reading >> 32) as u32 != track { return 0.0; }
+        f32::from_bits(reading as u32)
+    }
+
+    /// Tagged, lock-free readings of the selected channel at the sidechain tap.
+    pub fn sidechain_levels(&self, track: u16) -> [f32; 2] {
+        if self.shared.state.load(Ordering::Relaxed) != PLAYING { return [0.0; 2]; }
+        self.shared.sidechain_levels.each_ref().map(|level| {
+            let reading = level.load(Ordering::Relaxed);
+            if (reading >> 32) as u16 == track { f32::from_bits(reading as u32) } else { 0.0 }
+        })
+    }
+
     pub fn take_track_peaks(&self) -> Vec<[f32; 2]> {
         let heard = self.paced().map(|p| p.played(Instant::now()));
         self.shared.tracks.lock().map(|mut t| t.take(heard)).unwrap_or_default()
@@ -1297,6 +1318,12 @@ impl Feeder {
             }
         }
         if frames > 0 && self.meters {
+            let track = self.shared.sidechain_track.load(Ordering::Relaxed) as usize;
+            let reading = ((track as u64) << 32) | u64::from(e.sidechain_reduction(track).to_bits());
+            self.shared.sidechain_reduction.store(reading, Ordering::Relaxed);
+            for (slot, level) in self.shared.sidechain_levels.iter().zip(e.sidechain_levels(track)) {
+                slot.store(((track as u64) << 32) | u64::from(level.to_bits()), Ordering::Relaxed);
+            }
             let spent = t0.elapsed();
             self.shared.render_ns.fetch_add(spent.as_nanos() as u64, Ordering::Relaxed);
             self.busy += spent;

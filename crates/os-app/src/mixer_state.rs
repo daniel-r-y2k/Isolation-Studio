@@ -28,6 +28,7 @@ pub struct TrackState {
     pub swap: bool,
     pub slots_enabled: bool,
     pub eq: [[i32; 3]; 3],
+    pub sidechain: Vec<u8>,
     pub slots: [Option<(SlotPlugin, bool, f64, PluginCpu)>; 10],
 }
 
@@ -44,6 +45,7 @@ impl TrackState {
             swap: m.swap,
             slots_enabled: m.slots_enabled,
             eq: m.eq,
+            sidechain: m.sidechain.clone(),
             slots: std::array::from_fn(|k| m.slots[k].clone().map(|p| (p, m.slot_on[k], m.slot_mix[k], m.slot_cpu[k]))),
         }
     }
@@ -56,6 +58,7 @@ impl TrackState {
         }
         (m.volume, m.pan, m.stereo_separation) = (self.volume, self.pan, self.separation);
         (m.polarity, m.swap, m.slots_enabled, m.eq) = (self.polarity, self.swap, self.slots_enabled, self.eq);
+        m.sidechain = self.sidechain.clone();
         for (k, s) in self.slots.iter().enumerate() {
             let (p, on, mix, cpu) = match s {
                 Some((p, on, mix, cpu)) => (Some(SlotPlugin { id: os_model::Id::NONE, ..p.clone() }), *on, *mix, *cpu),
@@ -87,6 +90,7 @@ impl TrackState {
             "swap": self.swap,
             "slots_enabled": self.slots_enabled,
             "eq": self.eq,
+            "sidechain": self.sidechain,
             "slots": slots,
         });
         serde_json::to_string_pretty(&v).unwrap_or_default()
@@ -129,6 +133,7 @@ impl TrackState {
             swap: flag("swap", false),
             slots_enabled: flag("slots_enabled", true),
             eq,
+            sidechain: v.get("sidechain").cloned().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
             slots,
         })
     }

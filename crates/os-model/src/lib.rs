@@ -1516,6 +1516,8 @@ pub struct MixerTrack {
     /// The three-band equaliser as stored, per band `[gain, frequency, width]`: gain -1800..=1800 in 0.01 dB,
     /// frequency and width 0..=65536 (spec: audio/mixer.md "Equaliser"). Band 1 low shelf, 2 peaking, 3 high shelf.
     pub eq: [[i32; 3]; 3],
+    /// Integrated mixer sidechain state (versioned bytes; empty means disabled).
+    pub sidechain: Vec<u8>,
     /// The track's output and input latency settings in milliseconds, either sign, 0 = none (event 236; spec:
     /// flp/layouts.md "A mixer track's record", audio/delay-compensation.md "Settings").
     pub latency_out: f32,
@@ -1568,6 +1570,7 @@ impl PartialEq for MixerTrack {
             slot_on,
             slot_mix,
             eq,
+            sidechain,
             latency_out,
             latency_in,
             icon,
@@ -1598,6 +1601,7 @@ impl PartialEq for MixerTrack {
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
+            && *sidechain == o.sidechain
             && *latency_out == o.latency_out
             && *latency_in == o.latency_in
             && *icon == o.icon
@@ -1648,6 +1652,7 @@ impl MixerTrack {
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
+            sidechain: Vec::new(),
             latency_out: 0.0,
             latency_in: 0.0,
             icon: None,

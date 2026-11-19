@@ -1,7 +1,7 @@
 // Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The mixer detail panel's quick sidechain workflow, backed by a native FX slot.
+//! Integrated mixer sidechain controls.
 use crate::app::State;
 use crate::mixer::{self, MCmd};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
@@ -12,35 +12,45 @@ pub fn slot(s: &State, track: u16) -> Option<usize> {
 }
 
 pub fn settings(s: &State, track: u16) -> Settings {
-    slot(s, track).and_then(|k| Settings::decode(&mixer::track(s, track)?.slots[k].as_ref()?.state)).unwrap_or_default()
+    mixer::track(s, track).and_then(|m| Settings::decode(&m.sidechain).or_else(|| {
+        let k = slot(s, track)?;
+        let mut st = Settings::decode(&m.slots[k].as_ref()?.state)?;
+        st.enabled = m.slot_on[k];
+        st.values[5] *= m.slot_mix[k] as f32;
+        Some(st)
+    })).unwrap_or_default()
 }
 
-pub fn enabled(s: &State, track: u16) -> bool {
-    slot(s, track).is_some_and(|k| mixer::track(s, track).is_some_and(|m| m.slot_on[k]))
-}
+pub fn enabled(s: &State, track: u16) -> bool { settings(s, track).enabled }
 
 pub fn store(s: &mut State, track: u16, value: Settings) {
-    if let Some(k) = slot(s, track) {
-        mixer::track_mut(s, track).unwrap().slots[k].as_mut().unwrap().state = value.encode();
+    if let Some(m) = mixer::track_mut(s, track) {
+        m.sidechain = value.encode();
+        for k in 0..m.slots.len() {
+            if m.slots[k].as_ref().is_some_and(|p| p.name == NAME && Settings::decode(&p.state).is_some()) {
+                m.slots[k] = None;
+                m.slot_on[k] = true;
+                m.slot_mix[k] = 1.0;
+                m.slot_cpu[k] = Default::default();
+            }
+        }
         s.piano.dirty = true;
     }
 }
 
 pub fn toggle(s: &mut State) -> Option<String> {
-    let track = s.selected_mixer;
-    let m = mixer::track_mut(s, track)?;
-    if let Some(k) = m.slots.iter().position(|p| p.as_ref().is_some_and(|p| p.name == NAME)) {
-        m.slot_on[k] = !m.slot_on[k];
-    } else {
-        let Some(k) = m.slots.iter().position(Option::is_none) else {
-            return Some("Sidechain needs a free FX slot. Remove an effect first.".into());
-        };
-        m.slots[k] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: NAME.into(), state: Settings::default().encode() });
-        m.slot_on[k] = true;
-        m.slot_mix[k] = 1.0;
-        m.slot_cpu[k] = Default::default();
-    }
-    s.piano.dirty = true;
+    let t = s.selected_mixer;
+    let mut st = settings(s, t);
+    st.enabled = !st.enabled;
+    store(s, t, st);
+    None
+}
+
+pub fn position(s: &mut State) -> Option<String> {
+    let t = s.selected_mixer;
+    let mut st = settings(s, t);
+    st.pre_fx = !st.pre_fx;
+    store(s, t, st);
     None
 }
 
@@ -59,7 +69,6 @@ pub fn source_menu(s: &State, at: (f32, f32)) -> Popup {
 
 pub fn source(s: &mut State, source: Option<u16>) -> Option<String> {
     let t = s.selected_mixer;
-    if slot(s, t).is_none() { return None; }
     if let Some(src) = source {
         if src == 0 || mixer::track(s, src).is_none() || mixer::makes_loop(s, src, t) {
             return Some("Choose a different trigger track; this routing would create a feedback loop.".into());
@@ -79,12 +88,47 @@ pub fn source(s: &mut State, source: Option<u16>) -> Option<String> {
 
 pub fn remap(s: &mut State, f: &dyn Fn(u16) -> Option<u16>) {
     for m in &mut s.project.mixer {
+        if let Some(mut st) = Settings::decode(&m.sidechain) {
+            st.source = st.source.and_then(f);
+            m.sidechain = st.encode();
+        }
         for p in m.slots.iter_mut().flatten().filter(|p| p.name == NAME) {
             if let Some(mut st) = Settings::decode(&p.state) {
                 st.source = st.source.and_then(f);
                 p.state = st.encode();
             }
         }
+    }
+}
+
+/// UI-only history sampled at 30 Hz from the audio thread's atomic DSP reading.
+pub struct Preview {
+    pub samples: [f32; 96],
+    pub levels: [[f32; 2]; 96],
+    pub next: usize,
+    pub current: f32,
+    track: Option<u16>,
+    at: Option<std::time::Instant>,
+}
+impl Default for Preview {
+    fn default() -> Self { Self { samples: [0.0; 96], levels: [[0.0; 2]; 96], next: 0, current: 0.0, track: None, at: None } }
+}
+impl Preview {
+    pub fn feed(&mut self, track: u16, value: f32, levels: [f32; 2], active: bool, now: std::time::Instant) -> bool {
+        if self.track != Some(track) || !active {
+            self.samples.fill(0.0);
+            self.levels.fill([0.0; 2]);
+            self.next = 0;
+            self.current = 0.0;
+            self.track = Some(track);
+        }
+        if self.at.is_some_and(|at| now.saturating_duration_since(at) < std::time::Duration::from_millis(33)) { return false; }
+        self.at = Some(now);
+        self.current = if active && value.is_finite() { value.max(0.0) } else { 0.0 };
+        self.samples[self.next] = self.current;
+        self.levels[self.next] = levels.map(|v| if active && v.is_finite() { v.max(0.0) } else { 0.0 });
+        self.next = (self.next + 1) % self.samples.len();
+        true
     }
 }
 
@@ -98,6 +142,8 @@ mod tests {
     fn app() -> App {
         let mut a = App::new(None);
         a.state.project = crate::app::test_project();
+        // Project files store the mixer after an arrangement, as in a normal app project.
+        a.state.project.arrangements.push(os_flp::project::default_arrangement());
         a.state.control.settle(&mut a.state.project);
         a.state.selected_mixer = 1;
         a.state.z = vec![Win::Mixer];
@@ -120,9 +166,14 @@ mod tests {
         assert_eq!(settings(&a.state, 1).values[0], -45.0);
         crate::history::undo(&mut a.state);
         assert_eq!(settings(&a.state, 1).values[0], -24.0);
+        mixer::hit(&mut a, MHit::SidechainPosition);
+        assert!(settings(&a.state, 1).pre_fx);
+        crate::history::undo(&mut a.state);
+        assert!(!settings(&a.state, 1).pre_fx);
         let file = os_flp::project::create(&a.state.project).unwrap();
         let saved = os_flp::project::load(&file).unwrap();
-        assert_eq!(saved.mixer[1].slots[0].as_ref().unwrap().state, a.state.project.mixer[1].slots[0].as_ref().unwrap().state);
+        assert_eq!(saved.mixer[1].sidechain, a.state.project.mixer[1].sidechain);
+        assert!(saved.mixer[1].slots.iter().all(Option::is_none));
         let st = crate::mixer_state::TrackState::of(mixer::track(&a.state, 1).unwrap());
         assert_eq!(crate::mixer_state::TrackState::from_json(&st.to_json()).unwrap(), st);
         mixer::hit(&mut a, MHit::SidechainEnable);
@@ -151,12 +202,13 @@ mod tests {
         assert_eq!(settings(&a.state, 1).source, Some(3));
         mixer::run(&mut a, MCmd::Delete(3));
         assert_eq!(settings(&a.state, 1).source, None);
-        let p = mixer::track(&a.state, 1).unwrap().slots[0].clone();
+        let p = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: "Existing FX".into(), state: vec![] });
         mixer::track_mut(&mut a.state, 2).unwrap().slots.fill(p);
         a.state.selected_mixer = 2;
         // Filled with other effects: enabling must never replace one.
         for p in mixer::track_mut(&mut a.state, 2).unwrap().slots.iter_mut().flatten() { p.name = "Existing FX".into(); }
-        assert!(toggle(&mut a.state).is_some());
+        assert!(toggle(&mut a.state).is_none());
+        assert!(enabled(&a.state, 2));
         assert!(mixer::track(&a.state, 2).unwrap().slots.iter().flatten().all(|p| p.name == "Existing FX"));
     }
 

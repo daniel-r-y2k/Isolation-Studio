@@ -535,6 +535,7 @@ impl Multicore {
             sig.push(u32::from(m.threaded));
             sig.push(m.routes.len() as u32);
             sig.extend(m.routes.iter().map(|r| r.dest as u32));
+            sig.push(m.sidechain_key.map_or(none, |k| k as u32));
             sig.push(m.effects.len() as u32);
             sig.extend(m.effects.iter().flat_map(|f| [f.key.map_or(none, |k| k as u32), f.main.map_or(none, |k| k as u32)]));
         }
@@ -557,6 +558,9 @@ impl Multicore {
                     self.pairs.push((pos[r.dest], pos[s]));
                     self.edges.push((pos[s], pos[r.dest]));
                 }
+            }
+            if let Some(k) = m.sidechain_key.filter(|&k| k != s && k < n) {
+                self.edges.push((pos[k].min(pos[s]), pos[k].max(pos[s])));
             }
             for f in &m.effects {
                 for k in [f.key, f.main].into_iter().flatten().filter(|&k| k != s && k < n) {

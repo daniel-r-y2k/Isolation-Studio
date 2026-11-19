@@ -785,6 +785,10 @@ struct MixTrack {
     eq: os_dsp::mixer::TrackEq,
     /// Insert effects in slot order (applied before the fader).
     effects: Vec<FxSlot>,
+    sidechain: crate::effects::sidechain::Compressor,
+    sidechain_settings: crate::effects::sidechain::Settings,
+    sidechain_key: Option<usize>,
+    sidechain_pads: [pdc::Pad; 2],
     /// Slot switches and stored mix levels (0..12800) by slot, for hosted effects attached later.
     slot_on: [bool; 10],
     slot_mix: [i32; 10],
@@ -955,6 +959,10 @@ impl MixTrack {
             threaded: true,
             eq: os_dsp::mixer::TrackEq::default(),
             effects: Vec::new(),
+            sidechain: crate::effects::sidechain::Compressor::new(Default::default(), 48000),
+            sidechain_settings: Default::default(),
+            sidechain_key: None,
+            sidechain_pads: Default::default(),
             slot_on: [true; 10],
             slot_mix: [12800; 10],
             slot_smart: [false; 10],
@@ -1462,8 +1470,18 @@ impl Engine {
                 .iter()
                 .map(|m| {
                     let mut effects = Vec::new();
+                    let mut sidechain_settings = crate::effects::sidechain::Settings::decode(&m.sidechain);
+
                     for (k, slot) in m.slots.iter().enumerate() {
                         let Some(slot) = slot else { continue };
+                        if slot.name == crate::effects::sidechain::NAME {
+                            if let Some(mut st) = crate::effects::sidechain::Settings::decode(&slot.state) {
+                                st.enabled = m.slot_on[k];
+                                st.values[5] *= m.slot_mix[k] as f32;
+                                if sidechain_settings.is_none() { sidechain_settings = Some(st); }
+                                continue;
+                            }
+                        }
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
                             Some(mut fx) => {
                                 fx.set_tempo(tempo);
@@ -1499,6 +1517,8 @@ impl Engine {
                         threaded: m.threaded,
                         eq: os_dsp::mixer::TrackEq::new(m.eq, rate),
                         effects,
+                        sidechain_settings: sidechain_settings.unwrap_or_default(),
+                        sidechain: crate::effects::sidechain::Compressor::new(sidechain_settings.unwrap_or_default(), rate),
                         slot_on: m.slot_on,
                         slot_mix: m.slot_mix.map(mix_level),
                         slot_smart: m.slot_cpu.map(|c| c.smart_disable),
@@ -1892,6 +1912,15 @@ impl Engine {
 
     /// Peak level per mixer track (L, R) since the last call, after each track's fader; resets them. `out` keeps the
     /// larger of its old and the new values.
+    pub fn sidechain_levels(&self, track: usize) -> [f32; 2] {
+        self.tracks.get(track).map_or([0.0; 2], |t| t.sidechain.levels())
+    }
+
+    pub fn sidechain_reduction(&self, track: usize) -> f32 {
+        self.tracks.get(track).filter(|t| t.sidechain_settings.enabled && t.sidechain_key.is_some())
+            .map_or(0.0, |t| t.sidechain.reduction_db())
+    }
+
     pub fn take_track_peaks(&mut self, out: &mut Vec<[f32; 2]>) {
         out.resize(self.tracks.len(), [0.0; 2]);
         for (o, t) in out.iter_mut().zip(&mut self.tracks) {
@@ -2364,6 +2393,8 @@ impl Engine {
         self.pdc.restart();
         for t in &mut self.tracks {
             t.pad.clear();
+            t.sidechain.reset();
+            for pad in &mut t.sidechain_pads { pad.clear(); }
             for r in &mut t.routes {
                 r.pad.clear();
             }
@@ -3090,7 +3121,21 @@ impl Engine {
     /// Takes a project edit in place (see [`LiveEdit`]), as a new engine for the edited project would have it.
     pub fn apply_edit(&mut self, edit: LiveEdit) {
         match edit {
+            LiveEdit::MixerSidechain(t, settings) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    if settings.pre_fx != m.sidechain_settings.pre_fx || settings.enabled != m.sidechain_settings.enabled {
+                        for pad in &mut m.sidechain_pads { pad.clear(); }
+                    }
+                    if !settings.enabled { m.sidechain.reset(); }
+                    m.sidechain_settings = settings;
+                    m.sidechain.set_sidechain(settings);
+                }
+            }
             LiveEdit::Sidechain(t, k, settings) => {
+                if let Some(m) = self.tracks.get_mut(t) {
+                    m.sidechain_settings = settings;
+                    m.sidechain.set_sidechain(settings);
+                }
                 if let Some(slot) = self.tracks.get_mut(t).and_then(|m| m.effects.iter_mut().find(|e| e.slot == k)) {
                     if let Fx::Own(fx) = &mut slot.fx { fx.set_sidechain(settings); }
                 }
@@ -4206,6 +4251,28 @@ struct Lane<'a> {
     moved: &'a mut bool,
 }
 
+/// Uses the existing keyed compressor; no analysis or allocation on the audio path.
+fn run_mixer_sidechain(track: &mut MixTrack, buf: &mut [f32], cx: &multicore::MixCx, pre: bool) {
+    let st = track.sidechain_settings;
+    if st.pre_fx != pre { return; }
+    track.sidechain.clear_levels();
+    if !st.enabled { track.sidechain.reset(); return; }
+    // SAFETY: the graph includes this key dependency, just like a slot's auxiliary bus.
+    let key = track.sidechain_key.and_then(|k| unsafe { cx.keys.get(k) }).filter(|k| k.len() == buf.len());
+    if let Some(key) = key {
+        let pad = &mut track.sidechain_pads[usize::from(!pre)];
+        if pad.len() == 0 {
+            track.sidechain.process_keyed(buf, key);
+        } else {
+            for (frame, key) in buf.chunks_exact_mut(2).zip(key.chunks_exact(2)) {
+                let mut delayed = [key[0], key[1]];
+                pad.run(&mut delayed);
+                track.sidechain.process_keyed(frame, &delayed);
+            }
+        }
+    } else { track.sidechain.process(buf); }
+}
+
 /// A mixer track's turn in a tick (`Engine::mix`): a monitored input joins, its slots, its equaliser, its fader matrix;
 /// its output for the slots that listen to it, its meters, its capture; then what it sends to other tracks and plays on
 /// a device pair goes to its outbox.
@@ -4227,6 +4294,7 @@ fn mix_track(lane: Lane, cx: &multicore::MixCx, s: &mut multicore::MixScratch) {
     if let Some((r, at, arm)) = tap.filter(|(_, _, a)| matches!(a.point, RecordPoint::External | RecordPoint::WithMixer)) {
         rec_input(r, t, at, arm, track.input, cx.io, buf, &mut s.rec);
     }
+    run_mixer_sidechain(track, buf, cx, true);
     // A slot runs when its own switch is on and the track's slots are enabled (spec: audio/mixer.md).
     if track.slots_enabled && if t == 0 { cx.master_fx } else { cx.insert_fx } {
         let (dry, l, r, key_buf, main_buf) = (&mut s.dry, &mut s.l, &mut s.r, &mut s.key, &mut s.main);
@@ -4243,6 +4311,7 @@ fn mix_track(lane: Lane, cx: &multicore::MixCx, s: &mut multicore::MixScratch) {
         r.push(t, at, buf);
     }
     track.eq.process(buf);
+    run_mixer_sidechain(track, buf, cx, false);
     if let Some((r, at, rec::Arm { point: RecordPoint::PostEq, .. })) = tap {
         r.push(t, at, buf);
     }
@@ -4796,6 +4865,7 @@ pub enum LiveEdit {
     MixerPan(usize, f64),
     MixerSeparation(usize, f64),
     Sidechain(usize, usize, crate::effects::sidechain::Settings),
+    MixerSidechain(usize, crate::effects::sidechain::Settings),
 }
 
 impl LiveEdit {
@@ -4807,6 +4877,9 @@ impl LiveEdit {
             }
         };
         match self {
+            LiveEdit::MixerSidechain(t, settings) => {
+                if let Some(m) = project.mixer.get_mut(t) { m.sidechain = settings.encode(); }
+            }
             LiveEdit::Sidechain(t, k, settings) => {
                 if let Some(p) = project.mixer.get_mut(t).and_then(|m| m.slots.get_mut(k)).and_then(Option::as_mut) {
                     if p.name == crate::effects::sidechain::NAME { p.state = settings.encode(); }
@@ -4854,6 +4927,13 @@ pub fn live_edits(sent: &mut Project, new: &Project) -> Option<Vec<LiveEdit>> {
         }
     }
     for (t, (a, b)) in sent.mixer.iter().zip(&new.mixer).enumerate() {
+        if a.sidechain != b.sidechain {
+            let before = crate::effects::sidechain::Settings::decode(&a.sidechain).unwrap_or_default();
+            let after = crate::effects::sidechain::Settings::decode(&b.sidechain).unwrap_or_default();
+            if before.source == after.source && !b.sidechain.is_empty() {
+                edits.push(LiveEdit::MixerSidechain(t, after));
+            }
+        }
         for (k, (old, new)) in a.slots.iter().zip(&b.slots).enumerate() {
             if let (Some(old), Some(new)) = (old, new) {
                 if old.name == crate::effects::sidechain::NAME && new.name == old.name && old.id == new.id && old.state != new.state {
@@ -9237,7 +9317,7 @@ mod tests {
         p.mixer[2].routes = vec![1];
         p.mixer[2].send_levels = vec![(1, 0.0)];
         let dry = render_with(&p, false);
-        let settings = Settings { source: Some(2), values: [-40.0, 10.0, 0.1, 150.0, 0.0, 1.0] };
+        let settings = Settings { source: Some(2), enabled: true, values: [-40.0, 10.0, 0.1, 150.0, 0.0, 1.0], ..Settings::default() };
         p.mixer[1].slots[0] = Some(os_model::SlotPlugin { id: os_model::Id::NONE, name: NAME.into(), state: settings.encode() });
         let wet = render_with(&p, false);
         let beat = (44100.0 * 60.0 / 130.0) as usize;
@@ -9256,6 +9336,15 @@ mod tests {
         new.mixer[1].slots[0].as_mut().unwrap().state = adjusted.encode();
         assert_eq!(live_edits(&mut p, &new), Some(vec![LiveEdit::Sidechain(1, 0, adjusted)]));
         assert_eq!(p, new);
+        p.mixer[1].slots[0] = None;
+        for pre_fx in [false, true] {
+            p.mixer[1].sidechain = Settings { pre_fx, ..settings }.encode();
+            assert_eq!(render_with(&p, false), wet, "integrated processor runs once at either position");
+        }
+        let mut changed = p.clone();
+        let switched = Settings { pre_fx: false, ..settings };
+        changed.mixer[1].sidechain = switched.encode();
+        assert_eq!(live_edits(&mut p, &changed), Some(vec![LiveEdit::MixerSidechain(1, switched)]));
     }
 
     /// spec: audio/sidechain.md "Settings", "Sidechain input"; plugins/fruity-limiter-dsp.md: a Fruity Limiter on

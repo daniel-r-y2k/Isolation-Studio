@@ -55,6 +55,7 @@ pub enum MHit {
     /// The current track's equaliser graph: a press grabs the band nearest the cursor's frequency.
     EqGraph,
     SidechainEnable,
+    SidechainPosition,
     SidechainSource,
     /// The current track's record-source icon, input combo and output combo (spec: audio/track-io.md §1.1).
     RecSource,
@@ -231,6 +232,7 @@ pub struct MixerUi {
     pub pending: Vec<FxReq>,
     /// Meter state per track (`meters::Meter`), fed by `feed_meters`.
     pub meters: Vec<crate::meters::Meter>,
+    pub sidechain_preview: crate::sidechain::Preview,
     /// Meter ballistics and look.
     pub meter_cfg: crate::meters::Settings,
     /// When the meters last advanced.
@@ -284,7 +286,7 @@ pub const WAVE_LEN: usize = 600;
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), slot_colors: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
+            sidechain_preview: Default::default(), meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None, waveforms: false, waves: Vec::new(), extra: true,
             faders: FaderGroup::default(), move_grab: None }
     }
 }
@@ -646,6 +648,10 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
     let at = app.mouse;
     let s = &mut app.state;
     match h {
+        MHit::SidechainPosition => {
+            let t = s.selected_mixer;
+            edit(s, "Sidechain position", Region::Track(t), crate::sidechain::position)
+        }
         MHit::SidechainEnable => {
             let t = s.selected_mixer;
             edit(s, "Sidechain enable", Region::Track(t), crate::sidechain::toggle)

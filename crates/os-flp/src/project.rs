@@ -1886,6 +1886,8 @@ fn mixer_param_records(data: &[u8]) -> impl Iterator<Item = (usize, u8, u8, u16,
 
 const MX_KIND_PARAM: u8 = 0x1F;
 const MX_KIND_ROUTE: u8 = 0x20;
+// Lemon mixer extension: eight little-endian words of versioned sidechain state.
+const MX_KIND_SIDECHAIN: u8 = 0x7D;
 const MX_VOLUME: u8 = 0xC0;
 const MX_PAN: u8 = 0xC1;
 const MX_STEREO: u8 = 0xC2;
@@ -2368,6 +2370,27 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
                 }
             }
         }
+        let mut sidechain = Vec::new();
+        for pid in 0..8 {
+            if let Some((_, _, _, _, v)) = mixer_param_records(params).find(|&(_, p, k, loc, _)| k == MX_KIND_SIDECHAIN && p == pid && loc == base) {
+                sidechain.extend(v.to_le_bytes());
+            }
+        }
+        // Migrate the former automatic slot, retaining its switch and wet level.
+        for k in 0..slots.len() {
+            if let Some(p) = slots[k].as_ref().filter(|p| p.name == "Lemon Sidechain" && matches!(p.state.len(), 30 | 32) && p.state.starts_with(b"LSC1")) {
+                if sidechain.is_empty() {
+                    sidechain = p.state[..30].to_vec();
+                    let mix = f32::from_le_bytes(sidechain[26..30].try_into().unwrap()) * slot_mix[k] as f32;
+                    sidechain[26..30].copy_from_slice(&mix.to_le_bytes());
+                    sidechain.extend([u8::from(slot_on[k]), p.state.get(31).copied().unwrap_or(0)]);
+                }
+                slots[k] = None;
+                slot_on[k] = true;
+                slot_mix[k] = 1.0;
+                slot_cpu[k] = Default::default();
+            }
+        }
         let flags = track_flags(m.flags.and_then(|i| events[i].data()));
         let flag = |f: u8, default: bool| flags.map_or(default, |b| b & f != 0);
         let fresh = MixerTrack::new(index);
@@ -2398,6 +2421,7 @@ fn load_mixer(events: &[Event], l: &Layout, enc: TextEnc) -> Vec<MixerTrack> {
             stereo_separation: param(MX_STEREO).map(|v| f64::from(v) / 64.0),
             slot_on,
             slot_mix,
+            sidechain,
             eq,
             latency_out,
             latency_in,
@@ -3353,12 +3377,13 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
     // trimmed tracks: their slots follow them, spec: flp/events/mixer.md "Removing tracks"). A plugin that stays (or
     // moves) keeps its own events.
     let slot_names = |t: &MixerTrack| t.slots.iter().map(|s| s.as_ref().map(|s| s.name.clone())).collect::<Vec<_>>();
+    let migrated: Vec<bool> = (0..n).map(|t| file_track(t).is_some_and(|f| file_slots.iter().any(|r| r.track == usize::from(f) && r.plugin.name == "Lemon Sidechain" && r.plugin.state.starts_with(b"LSC1") && matches!(r.plugin.state.len(), 30 | 32)))).collect();
     let rewrite: Vec<bool> = project
         .mixer
         .iter()
         .zip(&current.mixer)
         .enumerate()
-        .map(|(t, (m, old))| slot_names(m) != slot_names(old) || (m.slots.iter().any(Option::is_some) && m.origin != file_track(t)))
+        .map(|(t, (m, old))| migrated[t] || slot_names(m) != slot_names(old) || (m.slots.iter().any(Option::is_some) && m.origin != file_track(t)))
         .collect();
     if !skip_mixer && rewrite.iter().any(|&r| r) {
         let areas = slot_areas(events, &l);
@@ -3420,10 +3445,10 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
             for k in 0..10u16 {
                 let loc = mixer_location(record_track(m.index, project.mixer.len()), k);
                 let s = usize::from(k);
-                if m.slot_on[s] != old.slot_on[s] {
+                if m.slot_on[s] != old.slot_on[s] || migrated[t] {
                     set_param_record(data, loc, MX_SLOT_ON, i32::from(m.slot_on[s]));
                 }
-                if m.slot_mix[s] != old.slot_mix[s] {
+                if m.slot_mix[s] != old.slot_mix[s] || migrated[t] {
                     set_param_record(data, loc, MX_SLOT_MIX, (m.slot_mix[s].clamp(0.0, 1.0) * SLOT_MIX_FULL).round() as i32);
                 }
             }
@@ -3564,6 +3589,16 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 };
                 let v = (v * scale).round() as i32;
                 data[off + 8..off + 12].copy_from_slice(&v.to_le_bytes());
+            }
+            if m.sidechain != old.sidechain || migrated[t] {
+                let loc = mixer_location(record_track(m.index, project.mixer.len()), 0);
+                for (pid, word) in m.sidechain.chunks_exact(4).take(8).enumerate() {
+                    set_record(data, MX_KIND_SIDECHAIN, loc, pid as u8, i32::from_le_bytes(word.try_into().unwrap()));
+                }
+                if m.sidechain.is_empty() {
+                    let recs: Vec<_> = data.chunks_exact(MIXER_REC_LEN).filter(|r| r[5] != MX_KIND_SIDECHAIN || u16::from_le_bytes([r[6], r[7]]) != loc).map(|r| r.to_vec()).collect();
+                    *data = recs.concat();
+                }
             }
             // The equaliser, band by band: gain, frequency and width (spec: flp/events/mixer.md). A file without a
             // band's record gets one.
@@ -4242,6 +4277,9 @@ fn track_records(t: u16, m: Option<&MixerTrack>) -> Vec<u8> {
         };
         out.extend(param_rec(pid, MX_KIND_PARAM, mixer_location(t, 0), v));
     }
+    for (pid, word) in m.sidechain.chunks_exact(4).take(8).enumerate() {
+        out.extend(param_rec(pid as u8, MX_KIND_SIDECHAIN, mixer_location(t, 0), i32::from_le_bytes(word.try_into().unwrap())));
+    }
     let mut levels = m.send_levels.clone();
     levels.sort_by_key(|&(d, _)| d);
     for (dest, level) in levels {
@@ -4354,6 +4392,7 @@ fn mixer_is_default(mixer: &[MixerTrack]) -> bool {
         t.name.is_none()
             && t.color.is_none()
             && t.enabled
+            && t.sidechain.is_empty()
             && t.slots.iter().all(Option::is_none)
             && t.slot_on.iter().all(|&on| on)
             && t.slot_mix.iter().all(|&m| m == 1.0)
@@ -5846,6 +5885,11 @@ mod tests {
         m.send_levels = vec![(5, 0.5)];
         m.slots[0] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Parametric EQ 2".into(), state: vec![1, 2, 3] });
         m.slots[3] = Some(SlotPlugin { id: os_model::Id::NONE, name: crate::wrapper::WRAPPER.into(), state: vec![10, 0, 0, 0] });
+        let mut sc = b"LSC1".to_vec();
+        sc.extend(5u16.to_le_bytes());
+        for value in [-24.0f32, 4.0, 5.0, 150.0, 6.0, 1.0] { sc.extend(value.to_le_bytes()); }
+        sc.extend([1, 0]);
+        m.sidechain = sc.clone();
         m.slot_on[3] = false;
         m.slot_mix[3] = 0.5;
         p.mixer[0].enabled = false;
@@ -5863,8 +5907,27 @@ mod tests {
         edited.mixer[2].slots.swap(0, 9);
         edited.mixer[4].slots[1] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Fruity Limiter".into(), state: vec![] });
         edited.mixer[2].slot_mix[9] = 0.75;
+        edited.mixer[2].sidechain[31] = 1;
+        edited.mixer[2].sidechain[6..10].copy_from_slice(&(-30.0f32).to_le_bytes());
         apply(&edited, &mut file).unwrap();
         assert_eq!(load(&file).unwrap().mixer, edited.mixer);
+        // Legacy auto-slots become mixer state, then disappear from the saved FX chain.
+        let mut legacy = p.clone();
+        legacy.mixer[2].sidechain.clear();
+        legacy.mixer[2].slots[8] = Some(SlotPlugin { id: os_model::Id::NONE, name: "Lemon Sidechain".into(), state: sc[..30].to_vec() });
+        legacy.mixer[2].slot_mix[8] = 0.5;
+        let mut old_file = create(&legacy).unwrap();
+        let migrated = load(&old_file).unwrap();
+        assert!(migrated.mixer[2].slots[8].is_none());
+        assert_eq!(migrated.mixer[2].sidechain.len(), 32);
+        assert_eq!(f32::from_le_bytes(migrated.mixer[2].sidechain[26..30].try_into().unwrap()), 0.5);
+        apply(&migrated, &mut old_file).unwrap();
+        assert!(file_slot_runs(&old_file).unwrap().0.iter().all(|r| r.plugin.name != "Lemon Sidechain"));
+        assert_eq!(load(&old_file).unwrap().mixer, migrated.mixer);
+        let mut cleared = migrated.clone();
+        cleared.mixer[2].sidechain.clear();
+        apply(&cleared, &mut old_file).unwrap();
+        assert!(load(&old_file).unwrap().mixer[2].sidechain.is_empty());
     }
 
     /// A track's audio input and output, record source and monitor mode are events 154, 147, 165 and 166 (spec:

@@ -373,6 +373,16 @@ impl Engine {
         // (spec: audio/sidechain.md "Sidechain input").
         let mut keyed = vec![false; n];
         for t in 0..n {
+            let src = self.tracks[t].sidechain_settings.source.map(usize::from)
+                .filter(|&src| src < n && src != t && self.tracks[src].routes.iter().any(|r| r.dest == t));
+            self.tracks[t].sidechain_key = src;
+            if let Some(src) = src {
+                keyed[src] = true;
+                let late = [l.arriving[t], l.leaving[t]];
+                for (pad, late) in self.tracks[t].sidechain_pads.iter_mut().zip(late) {
+                    pad.set_len((late - l.leaving[src]).max(0) as usize);
+                }
+            }
             for i in 0..self.tracks[t].effects.len() {
                 let fx = &self.tracks[t].effects[i];
                 // A hosted plugin's port past the last input is no input (spec: audio/sidechain.md "Hosted plugins'

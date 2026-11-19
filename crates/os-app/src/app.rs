@@ -4386,6 +4386,13 @@ impl App {
             self.damage_rect(views::tapper::pad_rect(&self.state));
         }
         // Mixer meters (spec: ui/mixer.md §9): fall back after playback stops.
+        let sc_track = self.state.selected_mixer;
+        let sc_active = crate::sidechain::enabled(&self.state, sc_track);
+        let sc_value = self.transport.sidechain_reduction(sc_track);
+        let sc_levels = self.transport.sidechain_levels(sc_track);
+        if self.state.mixer.sidechain_preview.feed(sc_track, sc_value, sc_levels, sc_active, now) && self.state.shown(Win::Mixer) {
+            self.damage_live(Live::Meter);
+        }
         let peaks = self.transport.take_track_peaks();
         if crate::mixer::feed_meters(&mut self.state, &peaks) && self.state.shown(Win::Mixer) {
             self.damage_live(Live::Meter);
